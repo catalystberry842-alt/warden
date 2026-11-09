@@ -1,7 +1,7 @@
-# Draft only. Not submitted. Fill sha with the commit to pin before opening a catalog PR.
+# Draft only. Not submitted. sha pins the audit-fix merge (#1); re-pin if code changes before a catalog PR.
 name: warden
 repo: https://github.com/catalystberry842-alt/warden
-sha: SHA_TO_PIN
+sha: 06f1bed77de40347de576346b4f0dbafb3d5a6b0
 version: "0.1.0"
 description: "Two guards for Hermes turns: a destructive-command gate that sends rm -rf, force pushes, git reset --hard, DROP/TRUNCATE, DELETE without WHERE, prisma/drizzle resets, kubectl delete and terraform destroy to the human approval prompt, and a fake-done check that flags replies claiming tests passed, commits, pushes, fixes or deploys when no matching tool ran this turn. Disclosure: no network, no telemetry, no credentials, no files written; in-memory bounded state; fail-open on internal errors. Limitation: the approve action follows Hermes approval mode, so YOLO skips it unless gate_mode is block."
 maintainer: catalystberry842-alt
