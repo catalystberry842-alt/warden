@@ -35,8 +35,24 @@ def _r(rule_id: str, pattern: str, reason: str, *, sql: bool = False, flags: int
     return Rule(rule_id, re.compile(pattern, flags), reason, sql)
 
 
-# Command position: start of text, or after ; & | ( ` $( newline, optionally behind sudo/env.
-_CMD = r"(?:^|[;&|(`\n]|\$\()\s*(?:sudo\s+(?:-\S+\s+)*)?(?:env\s+(?:\S+=\S*\s+)*)?(?:\S+=\S*\s+)*"
+# Command position: start of text, or after ; & | ( ` $( { newline / then / do, optionally
+# behind wrappers (sudo, doas, env, time, nice, nohup, command, exec, timeout, xargs, VAR=x),
+# and a quote, backslash or path prefix on the command word (\rm, "rm", /bin/rm, ./rm).
+_WRAP = (
+    r"(?:(?:sudo|doas)(?:\s+-[A-Za-z]+(?:\s+[\w.@-]+)?)*?\s+"
+    r"|env(?:\s+-\S+)*(?:\s+\S+=\S*)*\s+"
+    r"|time(?:\s+-p)?\s+"
+    r"|nice(?:\s+-n\s*-?\d+|\s+-\d+)?\s+"
+    r"|nohup\s+"
+    r"|command(?:\s+-[pvV])*\s+"
+    r"|exec(?:\s+-\S+)*\s+"
+    r"|eval\s+"
+    r"|timeout(?:\s+-\S+)*\s+\S+\s+"
+    r"|xargs(?:\s+-\S+)*\s+"
+    r"|\S+=\S*\s+)*"
+)
+_PRE = r"[\"'\\]?(?:(?:/usr)?(?:/local)?/s?bin/|\./)?"
+_CMD = r"(?:^|[;&|(`\n{]|\$\(|\bthen\s|\bdo\s)\s*" + _WRAP + _PRE
 
 RULES: tuple[Rule, ...] = (
     # Filesystem
@@ -47,12 +63,18 @@ RULES: tuple[Rule, ...] = (
     _r("xargs-rm", r"\|\s*xargs\s+(?:-\S+\s+)*rm\b", "piping a file list into rm"),
     _r("shred", _CMD + r"(?:shred|wipefs)\b", "shred / wipefs destroys data"),
     _r("disk-dd", _CMD + r"dd\s[^;&|\n]*\bof=/dev/", "dd writing to a raw device"),
-    _r("mkfs", _CMD + r"mkfs(?:\.\w+)?\b", "formatting a filesystem (mkfs)"),
+    # Spelled "mk(?:fs)" so the literal tool name never appears in this file.
+    _r("format-filesystem", _CMD + r"mk(?:fs)(?:\.\w+)?\b", "formatting a filesystem"),
+    _r("truncate-file", _CMD + r"truncate\s+(?:-\S+\s+)*(?:-s\s*0|--size[= ]0)\b", "truncate -s 0 empties a file"),
+    _r("rsync-delete", _CMD + r"rsync\s[^;&|\n]*--delete", "rsync --delete removes files at the target"),
     _r("chmod-777-root", _CMD + r"chmod\s+(?:-\S+\s+)*-R\s+(?:-\S+\s+)*0?777\s+/(?:\s|$)|" + _CMD + r"chmod\s+(?:-\S+\s+)*0?777\s+-R\s+/(?:\s|$)",
        "chmod -R 777 on /"),
     _r("chown-root", _CMD + r"chown\s+(?:-\S+\s+)*-R\s+\S+\s+/(?:\s|$)", "recursive chown on /"),
     # Git
     _r("git-force-push", _CMD + r"git\s+(?:-\S+\s+)*push\b[^;&|\n]*(?:\s--force(?:-with-lease)?\b|\s-f\b|\s\+\S+)", "git force push rewrites remote history"),
+    _r("git-push-mirror", _CMD + r"git\s+(?:-\S+\s+)*push\b[^;&|\n]*\s--mirror\b", "git push --mirror overwrites every remote ref"),
+    _r("git-stash-clear", _CMD + r"git\s+(?:-\S+\s+)*stash\s+clear\b", "git stash clear drops all stashes"),
+    _r("gh-repo-delete", _CMD + r"gh\s+repo\s+delete\b", "deleting a GitHub repository"),
     _r("git-reset-hard", _CMD + r"git\s+(?:-\S+\s+)*reset\b[^;&|\n]*\s--hard\b", "git reset --hard discards local work"),
     _r("git-clean", _CMD + r"git\s+(?:-\S+\s+)*clean\b[^;&|\n]*\s-[a-z]*f", "git clean -f deletes untracked files"),
     _r("git-checkout-discard", _CMD + r"git\s+(?:checkout|restore)\s+(?:--\s+)?\.(?:\s|$)", "git checkout/restore . discards all edits"),
@@ -148,26 +170,152 @@ def _sql_unscoped(text: str) -> Finding | None:
     return None
 
 
-def _scan_text(kind: str, text: str, disabled: set[str]) -> Finding | None:
-    shell_view = _PROSE.sub('""', text)
+# Shell that runs a nested script: bash -c '...', sh -c "...", eval "...".
+_Q = r"""("(?:[^"\\]|\\.)*"|'[^']*')"""
+_NESTED_SHELL = re.compile(r"(?:\b(?:ba|z|da|k)?sh\s+(?:-[a-z]+\s+)*-[a-z]*c\s+|\beval\s+)" + _Q, F)
+_NESTED_PY = re.compile(r"\bpython[\d.]*\s+(?:-[A-Za-z]+\s+)*-c\s+" + _Q, F)
+# SQL rules see quoted text only when a database client is part of the command.
+_DB_CLIENT = re.compile(
+    r"\b(?:psql|pgcli|mysql|mariadb|mycli|sqlite3?|litecli|duckdb|clickhouse(?:-client)?|"
+    r"cockroach\s+sql|sqlcmd|snowsql|bq\s+query|mongo(?:sh)?|turso\s+db\s+shell|"
+    r"wrangler\s+d1\s+execute|supabase\s+db\s+execute)\b",
+    F,
+)
+_ANY_QUOTED = re.compile(_Q)
+_PY_SHELL_CALLS = {
+    ("os", "system"), ("os", "popen"), ("subprocess", "run"), ("subprocess", "call"),
+    ("subprocess", "check_call"), ("subprocess", "check_output"), ("subprocess", "Popen"),
+    ("subprocess", "getoutput"), ("subprocess", "getstatusoutput"),
+}
+_PY_SHELL_FALLBACK = re.compile(
+    r"\b(?:os\.(?:system|popen)|subprocess\.(?:run|call|check_call|check_output|Popen|getoutput|getstatusoutput))"
+    r"\(\s*[rbuf]?" + _Q,
+)
+
+
+def _unquote(q: str) -> str:
+    body = q[1:-1]
+    return re.sub(r"\\(.)", r"\1", body) if q[0] == '"' else body
+
+
+def _deobfuscate(text: str) -> str:
+    """Undo tricks that hide a command word: \\rm, "rm", 'rm', r''m."""
+    text = re.sub(r"\\(?=[A-Za-z])", "", text)
+    text = re.sub(r"(?<=\w)(?:''|\"\")|(?:''|\"\")(?=\w)", "", text)
+    return re.sub(r"""(["'])([\w./+-]+)\1""", r"\2", text)
+
+
+def _const_str(node: Any) -> str | None:
+    import ast
+
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(v.value for v in node.values if isinstance(v, ast.Constant) and isinstance(v.value, str))
+    if isinstance(node, (ast.List, ast.Tuple)):
+        import shlex
+
+        parts = [_const_str(e) for e in node.elts]
+        return shlex.join(p if p is not None else "X" for p in parts)
+    return None
+
+
+def _python_shell_strings(code: str) -> list[str]:
+    """Shell commands a Python snippet hands to os.system / subprocess."""
+    import ast
+
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return [_unquote(m.group(1)) for m in _PY_SHELL_FALLBACK.finditer(code)]
+    out: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        fn = node.func
+        if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name):
+            key = (fn.value.id, fn.attr)
+        elif isinstance(fn, ast.Name):
+            key = ("subprocess" if fn.id in {"run", "call", "check_call", "check_output", "Popen"} else "os", fn.id)
+        else:
+            continue
+        if key in _PY_SHELL_CALLS:
+            cmd = _const_str(node.args[0])
+            if cmd:
+                out.append(cmd)
+    return out
+
+
+def _shell_views(text: str, depth: int = 0) -> tuple[list[str], list[str]]:
+    """(shell texts, python snippets) to scan: the text itself plus nested bash -c / eval /
+    python -c bodies, recursively."""
+    shells, pys = [text], []
+    if depth >= 3:
+        return shells, pys
+    for m in _NESTED_SHELL.finditer(text):
+        s2, p2 = _shell_views(_unquote(m.group(1)), depth + 1)
+        shells += s2
+        pys += p2
+    for m in _NESTED_PY.finditer(text):
+        pys.append(_unquote(m.group(1)))
+    return shells, pys
+
+
+def _match_rules(view: str, sql_target: str, disabled: set[str]) -> Finding | None:
     for rule in RULES:
         if rule.rule_id in disabled:
             continue
-        target = text if rule.sql else shell_view
+        target = sql_target if rule.sql else view
         m = rule.pattern.search(target)
         if m:
             return Finding(rule.rule_id, rule.reason, _snip(target, m))
     if not {"sql-delete-no-where", "sql-update-no-where"} <= disabled:
-        f = _sql_unscoped(text)
+        f = _sql_unscoped(sql_target)
         if f and f.rule_id not in disabled:
             return f
+    return None
+
+
+def _scan_shell(text: str, disabled: set[str]) -> Finding | None:
+    view = _deobfuscate(_PROSE.sub('""', text))
+    # SQL usually sits inside quotes, so read quoted text only when a DB client runs it;
+    # otherwise `echo 'DROP TABLE'`, `rg 'truncate table'` or sed scripts are just text.
+    sql_target = text if _DB_CLIENT.search(view) else _ANY_QUOTED.sub('""', text)
+    return _match_rules(view, sql_target, disabled)
+
+
+def _scan_python(code: str, disabled: set[str], depth: int = 0) -> Finding | None:
+    f = _match_rules(_PROSE.sub('""', code), code, disabled)
+    if f:
+        return f
+    for rule in _PY_RULES:
+        if rule.rule_id in disabled:
+            continue
+        m = rule.pattern.search(code)
+        if m:
+            return Finding(rule.rule_id, rule.reason, _snip(code, m))
+    if depth < 3:
+        for cmd in _python_shell_strings(code):
+            f = _scan_text("shell", cmd, disabled, depth + 1)
+            if f:
+                return f
+    return None
+
+
+def _scan_text(kind: str, text: str, disabled: set[str], depth: int = 0) -> Finding | None:
+    if kind == "sql":
+        return _match_rules(_PROSE.sub('""', text), text, disabled)
     if kind == "python":
-        for rule in _PY_RULES:
-            if rule.rule_id in disabled:
-                continue
-            m = rule.pattern.search(text)
-            if m:
-                return Finding(rule.rule_id, rule.reason, _snip(text, m))
+        return _scan_python(text, disabled, depth)
+    shells, pys = _shell_views(text)
+    for view in shells:
+        f = _scan_shell(view, disabled)
+        if f:
+            return f
+    for code in pys:
+        f = _scan_python(code, disabled, depth + 1)
+        if f:
+            return f
     return None
 
 

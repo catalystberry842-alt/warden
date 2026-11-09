@@ -2,7 +2,7 @@
 
 A Hermes Agent plugin with two guards for the two agent failures people complain about most:
 
-1. **Destructive-command gate.** Before a tool runs, Warden reads the shell command, Python code or SQL it is about to execute. If it looks destructive (`rm -rf`, `git push --force`, `git reset --hard`, `DROP TABLE`, `DELETE` with no `WHERE`, `prisma migrate reset`, `drizzle-kit push --force`, `kubectl delete`, `terraform destroy`, `dd of=/dev/...`, `mkfs`, `chmod -R 777 /`, a delete tool on many files, and more), Warden sends it to the Hermes human approval prompt instead of letting it run.
+1. **Destructive-command gate.** Before a tool runs, Warden reads the shell command, Python code or SQL it is about to execute. If it looks destructive (`rm -rf`, `git push --force`, `git reset --hard`, `DROP TABLE`, `DELETE` with no `WHERE`, `prisma migrate reset`, `drizzle-kit push --force`, `kubectl delete`, `terraform destroy`, `git push --mirror`, `gh repo delete`, `rsync --delete`, `dd of=/dev/...`, filesystem formatting, `chmod -R 777 /`, a delete tool on many files, and more). It also looks through the usual disguises: `bash -c '...'`, `sh -c`, `eval`, `python -c`, wrappers like `sudo`, `env`, `time`, `nice`, `nohup`, `timeout` and `xargs`, `/bin/rm` or `\rm` or `"rm"`, and shell commands passed to `os.system` / `subprocess` in `execute_code` Python, Warden sends it to the Hermes human approval prompt instead of letting it run.
 2. **Fake "done" check.** Warden records which tools actually ran in the turn. When the final reply says "tests pass", "I committed", "pushed", "fixed", "deployed", "lint is clean", "I checked" or "done", Warden matches each claim against that record. A claim with nothing behind it gets a short note appended to the reply. After code edits, Warden can also send the agent back once to actually run the tests it claimed.
 
 ```
@@ -22,7 +22,7 @@ A Hermes Agent plugin with two guards for the two agent failures people complain
 
 ## Why
 
-Real incidents: an agent deleted a production database during a code freeze, another wiped 60+ tables, and agents routinely report "all tests pass" when no test ran. Hermes already prompts for some dangerous shell patterns. Warden adds the database, migration and cloud commands those patterns miss, looks inside `execute_code` Python and SQL tool arguments, and adds the honesty check, which Hermes has no equivalent for.
+Real incidents: an agent deleted a production database during a code freeze, another wiped 60+ tables, and agents routinely report "all tests pass" when no test ran. Hermes already prompts for some dangerous shell patterns. Warden adds the database, migration and cloud commands those patterns miss, looks inside `execute_code` Python (including `os.system` / `subprocess` calls), nested `bash -c` / `python -c` and SQL tool arguments, and adds the honesty check, which Hermes has no equivalent for.
 
 ## Install
 
@@ -78,7 +78,7 @@ plugins:
 ## How the claim check decides
 
 - Claims are matched sentence by sentence. Questions, hedges ("I haven't run the tests", "you should run the tests", "once tests pass", "I'll deploy next"), quoted lines and code are ignored.
-- Each claim needs matching evidence from this turn: a test command (`pytest`, `npm test`, `go test`, `cargo test`, `gh pr checks`, ...) for test claims, `ruff`/`eslint`/`tsc`/`mypy` for lint, a build command for build, `git commit` / `git push` for those, a deploy command for deploys, an edit tool (`write_file`, `patch`, `sed -i`, ...) for "fixed", and any tool at all for "I checked" or "done".
+- Each claim needs matching evidence from this turn: a test command in command position (`pytest`, `uv run pytest`, `npm test`, `go test`, `cargo test`, `gh pr checks`, ...; `echo pytest` or `grep pytest` does not count) for test claims, `ruff`/`eslint`/`tsc`/`mypy` for lint, a build command for build, `git commit` / `git push` for those, a deploy command for deploys, an edit tool (`write_file`, `patch`, `sed -i`, ...) for "fixed", and any tool at all for "I checked" or "done".
 - Tool calls Warden or another plugin blocked do not count as evidence.
 - If the turn delegated work to a subagent, Warden stays quiet, since it cannot see the subagent's tools.
 - An "I've updated the function" reply that shows the code inline in a code block is not flagged.
@@ -87,7 +87,7 @@ plugins:
 
 - **YOLO / approvals off.** The `approve` action goes through the same Hermes approval gate as its own dangerous-command checks, so `--yolo` or `approvals.mode: off` lets it through. Use `gate_mode: block` or `deny_patterns` if you want a stop that YOLO cannot skip.
 - **No human present.** In a non-interactive context with no approval bridge, Hermes fails closed and blocks the call. Cron follows `approvals.cron_mode`.
-- **Pattern matching, not a parser.** A determined model can obfuscate a command. Warden catches the ordinary, accidental cases. SQL rules read the raw text, so `grep "drop table"` also asks for approval.
+- **Pattern matching, not a parser.** A determined model can still obfuscate a command (variables, base64, scripts written to disk and run later). Warden catches the ordinary, accidental cases and the common wrappers above. SQL rules read quoted text only when a database client (`psql`, `mysql`, `sqlite3`, `mongosh`, ...) is part of the command, so `echo 'DROP TABLE users'`, `rg 'truncate table' docs/` or a `sed` script run without a prompt.
 - **One transform wins.** Hermes uses the first plugin that rewrites a reply. If another plugin rewrites first, Warden falls back to logging the claim.
 - **`pre_verify` only fires after code edits**, so the nudge only applies to coding turns. The appended note covers every turn.
 - State lives in memory for the current process. It resets when Hermes restarts.
@@ -102,7 +102,7 @@ plugins:
 ## Development
 
 ```bash
-python -m pytest -q          # 108 tests; tests/test_hermes_live.py needs a Hermes checkout (HERMES_AGENT_ROOT)
+python -m pytest -q          # 166 tests; tests/test_hermes_live.py needs a Hermes checkout (HERMES_AGENT_ROOT)
 uvx ruff check .
-HERMES_AGENT_ROOT=../hermes-agent python scripts/demo.py   # offline demo, no model needed
+HERMES_AGENT_ROOT=../hermes-agent python tests/dev/demo.py   # offline demo, no model needed
 ```
