@@ -167,3 +167,22 @@ def test_pre_verify_quiet_when_tests_ran_or_disabled(w):
 
 def test_pre_verify_ignores_non_check_claims(w):
     assert w["claims"].on_pre_verify(session_id="s1", final_response="I've committed it.", attempt=0) is None
+
+
+def test_test_word_outside_command_position_is_not_evidence(w):
+    for cmd in ("echo pytest", "grep -n pytest setup.cfg", "cat pytest.ini", "pip install pytest"):
+        run(w, "terminal", cmd, turn="t-" + cmd)
+        out = reply(w, "All tests pass.", turn="t-" + cmd)
+        assert out and "a test command never ran" in out, cmd
+
+
+def test_wrapped_test_commands_count(w):
+    for i, cmd in enumerate(("cd app && pytest -q", "uv run pytest", "npx jest", "timeout 60 go test ./...",
+                             "CI=1 npm test", "./gradlew test", "bash -c 'pytest -x'", "poetry run pytest")):
+        run(w, "terminal", cmd, turn=f"tw{i}")
+        assert reply(w, "All tests pass.", turn=f"tw{i}") is None, cmd
+
+
+def test_done_with_no_tool_wording(w):
+    out = reply(w, "All done.", turn="t-nowork")
+    assert out and "reply says done, but no tool ran this turn" in out

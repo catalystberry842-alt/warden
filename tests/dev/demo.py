@@ -1,6 +1,6 @@
-"""Offline demo: load Warden through the real Hermes plugin manager and show both guards.
+"""Offline demo (dev-only, uses private Hermes internals, so it lives under tests/): load Warden through the real Hermes plugin manager and show both guards.
 
-Usage: HERMES_AGENT_ROOT=/path/to/hermes-agent python scripts/demo.py
+Usage: HERMES_AGENT_ROOT=/path/to/hermes-agent python tests/dev/demo.py
 No model, network or API key needed.
 """
 
@@ -11,7 +11,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 HERMES = Path(os.environ.get("HERMES_AGENT_ROOT", "/workspace/hermes-agent"))
 
 home = Path(tempfile.mkdtemp(prefix="warden-demo-"))

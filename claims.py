@@ -91,8 +91,18 @@ _HEDGE = re.compile(
     F,
 )
 
+# A test runner only counts in command position (start, or after ; & | ( newline), behind
+# optional wrappers, so `echo pytest` or `grep pytest setup.cfg` is not evidence.
+_TEST_CMD = (
+    r"(?:^|[;&|(`\n]|\$\()\s*"
+    r"(?:(?:sudo|time|nohup|command|exec|env(?:\s+\S+=\S*)*|timeout\s+\S+|\S+=\S*|"
+    r"(?:uv|poetry|pdm|hatch|pipenv|rye)\s+run(?:\s+-\S+)*|uvx|npx|bunx|pnpm\s+(?:exec|dlx)|"
+    r"yarn\s+(?:run|exec|dlx)|bundle\s+exec|python[\d.]*\s+-m|coverage\s+run\s+-m|"
+    r"(?:ba|z)?sh\s+-l?c)\s+)*"
+    r"[\"']?(?:\S*/)?"
+)
 TEST_RX = re.compile(
-    r"\b(?:pytest|py\.test|unittest|nose2|tox|nox|jest|vitest|mocha|ava|karma|"
+    _TEST_CMD + r"(?:pytest|py\.test|unittest|nose2|tox|nox|jest|vitest|mocha|ava|karma|"
     r"playwright\s+test|cypress\s+run|rspec|phpunit|minitest|go\s+test|cargo\s+(?:test|nextest)|"
     r"mvn\s+(?:\S+\s+)*(?:test|verify)|gradlew?\s+(?:\S+\s+)*(?:test|check)|dotnet\s+test|"
     r"swift\s+test|mix\s+test|deno\s+test|bun\s+test|ctest|make\s+(?:test|check)|"
@@ -238,7 +248,10 @@ def evaluate(text: str, runs: list[state.ToolRun], cfg: dict[str, Any]) -> list[
     for c in claims:
         hits = _matching(runs, EVIDENCE[c.category])
         if not hits:
-            problems.append(f"reply says {LABELS[c.category]}, but {NEEDS[c.category]} never ran this turn")
+            if c.category in ("verify", "done"):
+                problems.append(f"reply says {LABELS[c.category]}, but no tool ran this turn")
+            else:
+                problems.append(f"reply says {LABELS[c.category]}, but {NEEDS[c.category]} never ran this turn")
         elif c.category == "tests" and cfg.get("warn_on_failed_tests", True):
             last = hits[-1]
             if last.status == "error":

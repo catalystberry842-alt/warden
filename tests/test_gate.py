@@ -41,7 +41,8 @@ DESTRUCTIVE = [
     ("gcloud sql instances delete db1", "cloud-delete"),
     ("docker volume prune -f", "docker-prune"),
     ("dd if=/dev/zero of=/dev/sda bs=1M", "disk-dd"),
-    ("mkfs.ext4 /dev/sdb1", "mkfs"),
+    ("mkfs.ext4 /dev/sdb1", "format-filesystem"),
+    ("mkfs -t ext4 /dev/sdb1", "format-filesystem"),
     ("chmod -R 777 /", "chmod-777-root"),
     ("shred -u secrets.txt", "shred"),
 ]
@@ -166,3 +167,101 @@ def test_bad_user_regex_is_ignored(w):
     w["ctx"].settings["deny_patterns"] = ["("]
     out = w["gate"].on_pre_tool_call(tool_name="terminal", args={"command": "rm -rf /x"})
     assert out["action"] == "approve"
+
+
+# Commands the first audit showed slipping past the gate.
+BYPASSES = [
+    ("bash -c 'rm -rf /srv/app'", "rm-recursive-force"),
+    ('sh -c "git push --force origin main"', "git-force-push"),
+    ("zsh -lc 'rm -rf ~/work'", "rm-recursive-force"),
+    ("eval \"rm -rf /data\"", "rm-recursive-force"),
+    ("bash -c \"sh -c 'rm -rf /x'\"", "rm-recursive-force"),
+    ("/bin/rm -rf /", "rm-recursive-force"),
+    ("/usr/bin/rm -rf /var", "rm-recursive-force"),
+    ("\\rm -rf /var", "rm-recursive-force"),
+    ('"rm" -rf /var', "rm-recursive-force"),
+    ("'rm' -rf /var", "rm-recursive-force"),
+    ("r''m -rf /var", "rm-recursive-force"),
+    ("time rm -rf /var", "rm-recursive-force"),
+    ("nice -n 10 rm -rf /var", "rm-recursive-force"),
+    ("nohup rm -rf /var &", "rm-recursive-force"),
+    ("command rm -rf /var", "rm-recursive-force"),
+    ("env FOO=1 rm -rf /var", "rm-recursive-force"),
+    ("sudo -u root rm -rf /var", "rm-recursive-force"),
+    ("timeout 30 git push --force", "git-force-push"),
+    ("eval rm -rf /var", "rm-recursive-force"),
+    ("find . -type d | xargs rm -rf", "rm-recursive-force"),
+    ("cd /tmp; if true; then rm -rf /var; fi", "rm-recursive-force"),
+    ('python -c "import os; os.system(\'rm -rf /\')"', "rm-recursive-force"),
+    ("python3 -c 'import shutil; shutil.rmtree(\"/data\")'", "py-rmtree"),
+    ("git push --mirror origin", "git-push-mirror"),
+    ("gh repo delete me/app --yes", "gh-repo-delete"),
+    ("rsync -av --delete src/ /backup/", "rsync-delete"),
+    ("truncate -s 0 app.log", "truncate-file"),
+    ("truncate --size=0 db.sqlite", "truncate-file"),
+    ("git stash clear", "git-stash-clear"),
+    ('echo "DROP TABLE users;" | psql "$DB"', "sql-drop"),
+    ('mysql -e "TRUNCATE TABLE orders"', "sql-truncate"),
+]
+
+
+@pytest.mark.parametrize("cmd,rule", BYPASSES)
+def test_disguised_commands_are_gated(w, cmd, rule):
+    out = w["gate"].on_pre_tool_call(tool_name="terminal", args={"command": cmd})
+    assert out and out["action"] == "approve", cmd
+    assert out["rule_key"].startswith(f"warden:{rule}"), (cmd, out["rule_key"])
+
+
+PY_SHELL = [
+    ("import os\nos.system('rm -rf /srv')", "rm-recursive-force"),
+    ("import subprocess\nsubprocess.run('git push --force', shell=True)", "git-force-push"),
+    ("import subprocess\nsubprocess.run(['rm', '-rf', '/srv'])", "rm-recursive-force"),
+    ("import subprocess\nsubprocess.check_call(['bash', '-c', 'rm -rf /srv'])", "rm-recursive-force"),
+    ("from subprocess import run\nrun(['terraform', 'destroy', '-auto-approve'])", "terraform-destroy"),
+    ("import os\nos.popen(f'gh repo delete {name} --yes')", "gh-repo-delete"),
+    ("import shutil\nshutil.rmtree(path)", "py-rmtree"),
+    ("os.system('rm -rf /'", "rm-recursive-force"),  # syntax error -> regex fallback
+]
+
+
+@pytest.mark.parametrize("code,rule", PY_SHELL)
+def test_python_shell_calls_are_gated(w, code, rule):
+    out = w["gate"].on_pre_tool_call(tool_name="execute_code", args={"code": code})
+    assert out and out["rule_key"].startswith(f"warden:{rule}"), (code, out)
+
+
+NOT_SQL = [
+    "echo 'DROP TABLE users'",
+    "rg 'truncate table' docs/",
+    "sed -i 's/drop table//' notes.sql",
+    'grep -n "DELETE FROM users" migrations/',
+    'git log --grep="drop table"',
+    "printf 'UPDATE x SET y = 1'",
+    "cat README.md | grep 'rm -rf'",
+    "python -c 'print(1)'",
+    "subprocess_helper --mirror-docs",
+    "ls -la /bin/",
+    "git stash list",
+    "rsync -av src/ dst/",
+    "truncate -s 10M disk.img",
+]
+
+
+@pytest.mark.parametrize("cmd", NOT_SQL)
+def test_quoted_text_is_not_gated(w, cmd):
+    assert w["gate"].on_pre_tool_call(tool_name="terminal", args={"command": cmd}) is None, cmd
+
+
+def test_sql_inside_python_execute_still_gated(w):
+    code = "cur.execute('DROP TABLE invoices')"
+    out = w["gate"].on_pre_tool_call(tool_name="execute_code", args={"code": code})
+    assert out and "sql-drop" in out["rule_key"]
+
+
+def test_long_input_is_fast(w):
+    import time
+
+    cmd = "echo " + "a " * 20000 + "; ls " + "-x " * 5000
+    t = time.perf_counter()
+    assert w["gate"].on_pre_tool_call(tool_name="terminal", args={"command": cmd}) is None
+    assert time.perf_counter() - t < 2.0
