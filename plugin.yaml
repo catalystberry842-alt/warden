@@ -1,0 +1,86 @@
+name: warden
+version: 0.1.0
+description: "Two guards for Hermes turns: a destructive-command gate that sends rm -rf, force pushes, DROP/TRUNCATE, unscoped DELETE, terraform destroy and similar to human approval, and a fake-done check that flags replies claiming tests passed, commits, fixes or deploys that never ran."
+author: "catalystberry842-alt"
+license: MIT
+manifest_version: 2
+api_version: 1
+requires_hermes: ">=0.21.0"
+homepage: https://github.com/catalystberry842-alt/warden
+tags: [safety, approval, guardrails, verification, honesty]
+provides_hooks:
+  - pre_tool_call
+  - post_tool_call
+  - transform_llm_output
+  - post_llm_call
+  - pre_verify
+provides_tools: []
+config_schema:
+  enabled:
+    type: bool
+    default: true
+    label: Enabled
+    description: "Master switch. When false every hook is a no-op."
+  gate_enabled:
+    type: bool
+    default: true
+    label: Destructive-command gate
+    description: "Scan shell, Python and SQL a tool is about to run for destructive operations."
+  gate_mode:
+    type: str
+    choices: [approve, block, log]
+    default: approve
+    label: Gate mode
+    description: "approve sends the call to the Hermes human approval prompt; block refuses it outright; log only records it."
+  approval_scope:
+    type: str
+    choices: [command, rule]
+    default: command
+    label: Approval scope
+    description: "What an 'always allow' answer covers: this exact command, or every command hitting the same rule."
+  allow_patterns:
+    type: list
+    default: []
+    label: Allow patterns
+    description: "Extra regexes for commands that never need approval. Added to the built-in list (rm -rf of node_modules, dist, build and caches)."
+  deny_patterns:
+    type: list
+    default: []
+    label: Deny patterns
+    description: "Regexes that are always hard-blocked, whatever the gate mode."
+  extra_patterns:
+    type: list
+    default: []
+    label: Extra patterns
+    description: "Your own regexes that should also go to approval."
+  disabled_rules:
+    type: list
+    default: []
+    label: Disabled rules
+    description: "Built-in rule ids to turn off, for example git-branch-delete or sql-drop."
+  bulk_delete_threshold:
+    type: int
+    default: 5
+    label: Bulk delete threshold
+    description: "A delete/remove tool call touching this many paths or more is gated."
+  claims_enabled:
+    type: bool
+    default: true
+    label: Fake-done check
+    description: "Compare work claims in the final reply with the tools that actually ran this turn."
+  claims_mode:
+    type: str
+    choices: [append, log, off]
+    default: append
+    label: Claim warning
+    description: "append adds a short 'Warden check' note to the reply; log only writes a warning to the Hermes log."
+  verify_nudge:
+    type: bool
+    default: true
+    label: Verify nudge
+    description: "After code edits, send the agent back once if it claims tests, lint or a build that never ran."
+  warn_on_failed_tests:
+    type: bool
+    default: true
+    label: Warn on failed tests
+    description: "Also flag 'tests pass' when the last test command this turn failed."

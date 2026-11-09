@@ -1,0 +1,42 @@
+[project]
+name = "warden"
+version = "0.1.0"
+description = "Hermes plugin: destructive-command gate and fake-done check."
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0,<9"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["scripts", "docs", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+  "BLE001",  # fail-open hooks intentionally catch Exception
+  "E501",    # long strings in status/docs
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]
+
+[tool.coverage.run]
+branch = false
+omit = ["tests/*", "scripts/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = true
